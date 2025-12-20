@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SecureBank Pro - Connexion</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="login-page">
+    <div class="login-container">
+        <div class="login-left">
+            <h1>🏦 SecureBank Pro</h1>
+            <p>La banque nouvelle génération qui vous accompagne au quotidien. Gérez vos finances en toute sécurité et simplicité.</p>
+            
+            <div class="login-features">
+                <div class="feature-item">
+                    <div class="feature-icon">🔒</div>
+                    <div class="feature-text">
+                        <h3>Sécurité maximale</h3>
+                        <p>Vos données sont protégées 24h/24</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <div class="feature-icon">⚡</div>
+                    <div class="feature-text">
+                        <h3>Virements instantanés</h3>
+                        <p>Transférez votre argent en temps réel</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <div class="feature-icon">📱</div>
+                    <div class="feature-text">
+                        <h3>Notifications en direct</h3>
+                        <p>Soyez alerté de chaque mouvement</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="login-right">
+            <div class="login-box">
+                <div class="login-header">
+                    <div class="bank-logo">🏦</div>
+                    <h2>SecureBank Pro</h2>
+                    <p>Votre espace personnel sécurisé</p>
+                </div>
+
+                <div class="login-tabs">
+                    <button class="tab-btn active" data-tab="login">Connexion</button>
+                    <button class="tab-btn" data-tab="register">Inscription</button>
+                </div>
+
+                <div id="messageBox"></div>
+
+                <form id="loginForm" class="auth-form active" onsubmit="handleLogin(event)">
+                    <div class="form-group">
+                        <label for="loginEmail">📧 Adresse email</label>
+                        <input type="email" id="loginEmail" placeholder="exemple@email.com" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="loginPassword">🔑 Mot de passe</label>
+                        <input type="password" id="loginPassword" placeholder="••••••••" required>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary">
+                        Se connecter
+                    </button>
+                </form>
+
+                <form id="registerForm" class="auth-form" onsubmit="handleRegister(event)">
+                    <div class="form-group">
+                        <label for="registerNom">👤 Nom</label>
+                        <input type="text" id="registerNom" placeholder="Votre nom" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="registerPrenom">👤 Prénom</label>
+                        <input type="text" id="registerPrenom" placeholder="Votre prénom" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="registerEmail">📧 Adresse email</label>
+                        <input type="email" id="registerEmail" placeholder="exemple@email.com" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="registerPassword">🔑 Mot de passe</label>
+                        <input type="password" id="registerPassword" placeholder="Minimum 6 caractères" minlength="6" required>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary">
+                        Créer mon compte
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="login.js"></script>
+</body>
+</html>
