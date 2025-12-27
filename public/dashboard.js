@@ -6,30 +6,78 @@ let currentCards = [];
 let currentBeneficiaries = [];
 let currentProfile = {};
 
+function getWebSocketUrl() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}`;
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function escapeHtmlAttr(value) {
+    return escapeHtml(value);
+}
+
+function safeAccountStatus(value) {
+    return value === 'actif' ? 'actif' : 'bloque';
+}
+
+function safeTransactionType(value) {
+    const allowed = new Set(['virement', 'depot', 'retrait', 'paiement_carte']);
+    return allowed.has(value) ? value : 'transaction';
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    const userId = localStorage.getItem('userId');
+    const sessionToken = localStorage.getItem('sessionToken');
     const userName = localStorage.getItem('userName');
     
-    if (!userId) {
+    if (!sessionToken) {
         window.location.href = '/login.html';
         return;
     }
     
     document.getElementById('userName').textContent = userName || 'Utilisateur';
-    connectWebSocket(userId);
+    connectWebSocket(sessionToken);
     initNavigation();
     initForms();
     initPreferences();
     initPasswordStrength();
     initFilters();
+    initSafeActionHandlers();
+    initCspUiHandlers();
 });
 
-function connectWebSocket(userId) {
-    ws = new WebSocket('ws://localhost:3000');
+function initCspUiHandlers() {
+    document.getElementById('notifications-btn')?.addEventListener('click', () => {
+        showNotifications();
+    });
+
+    document.querySelectorAll('.quick-action-btn[data-quick-section]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const section = btn.getAttribute('data-quick-section');
+            if (section) {
+                window.showSection(section);
+            }
+        });
+    });
+
+    document.getElementById('export-btn')?.addEventListener('click', () => {
+        exportTransactions();
+    });
+}
+
+function connectWebSocket(sessionToken) {
+    ws = new WebSocket(getWebSocketUrl());
     
     ws.onopen = () => {
         console.log('Connecté au serveur');
-        ws.send(JSON.stringify({ type: 'auth', data: { userId: parseInt(userId) } }));
+        ws.send(JSON.stringify({ type: 'auth', data: { sessionToken } }));
     };
     
     ws.onmessage = (event) => {
@@ -44,8 +92,31 @@ function connectWebSocket(userId) {
     
     ws.onclose = () => {
         console.log('Déconnecté du serveur');
-        setTimeout(() => connectWebSocket(userId), 3000);
+        setTimeout(() => connectWebSocket(sessionToken), 3000);
     };
+}
+
+function initSafeActionHandlers() {
+    document.addEventListener('click', (e) => {
+        const copyBtn = e.target.closest('.copy-btn');
+        if (copyBtn && copyBtn.dataset.iban) {
+            copyIban(copyBtn.dataset.iban);
+            return;
+        }
+
+        const ribBtn = e.target.closest('.rib-btn');
+        if (ribBtn) {
+            const iban = ribBtn.dataset.iban || '';
+            const numero = ribBtn.dataset.numero || '';
+            downloadRIB(iban, numero);
+            return;
+        }
+
+        const useIbanBtn = e.target.closest('.use-iban-btn');
+        if (useIbanBtn && useIbanBtn.dataset.iban) {
+            useIban(useIbanBtn.dataset.iban);
+        }
+    });
 }
 
 function handleWebSocketMessage(message) {
@@ -327,10 +398,10 @@ function displayFilteredTransactions(transactions) {
     const transactionsHTML = transactions.map(t => {
         const isDebit = t.compte_source_id === currentAccounts[0]?.id;
         return `
-            <div class="transaction-item ${t.type_transaction}">
+            <div class="transaction-item ${safeTransactionType(t.type_transaction)}">
                 <div class="transaction-icon">${getTransactionIcon(t.type_transaction)}</div>
                 <div class="transaction-details">
-                    <div class="transaction-title">${t.description || getTransactionLabel(t.type_transaction)}</div>
+                    <div class="transaction-title">${escapeHtml(t.description || getTransactionLabel(t.type_transaction))}</div>
                     <div class="transaction-date">${formatDateTime(t.date_transaction)}</div>
                 </div>
                 <div class="transaction-amount ${isDebit ? 'debit' : 'credit'}">
@@ -353,8 +424,8 @@ function updateAccountsDisplay() {
         <div class="account-card animate-card" style="--delay: ${0.1 * (index + 1)}s">
             <div class="account-type">${account.type_compte === 'courant' ? '💳 Compte Courant' : '🏦 Compte Épargne'}</div>
             <div class="account-balance">${showBalance ? formatMoney(account.solde) : '••••••'}</div>
-            <div class="account-number">${account.iban}</div>
-            <div class="account-status ${account.statut}">${account.statut === 'actif' ? '✓ Actif' : '⚠ Bloqué'}</div>
+            <div class="account-number">${escapeHtml(account.iban)}</div>
+            <div class="account-status ${safeAccountStatus(account.statut)}">${account.statut === 'actif' ? '✓ Actif' : '⚠ Bloqué'}</div>
         </div>
     `).join('');
     
@@ -365,7 +436,7 @@ function updateAccountsDisplay() {
                 <div class="account-type-badge">
                     ${account.type_compte === 'courant' ? '💳 Compte Courant' : '🏦 Compte Épargne'}
                 </div>
-                <div class="account-status-indicator ${account.statut}"></div>
+                <div class="account-status-indicator ${safeAccountStatus(account.statut)}"></div>
             </div>
             
             <div class="account-balance-section">
@@ -376,15 +447,15 @@ function updateAccountsDisplay() {
             <div class="account-iban-section">
                 <div class="iban-label">IBAN</div>
                 <div class="iban-value">
-                    <span id="iban-${account.id}">${account.iban}</span>
-                    <button class="copy-btn" onclick="copyIban('${account.iban}')">📋 Copier</button>
+                    <span id="iban-${account.id}">${escapeHtml(account.iban)}</span>
+                    <button class="copy-btn" type="button" data-iban="${escapeHtmlAttr(account.iban)}">📋 Copier</button>
                 </div>
             </div>
             
             <div class="account-details-grid">
                 <div class="account-detail-item">
                     <div class="account-detail-label">Numéro de compte</div>
-                    <div class="account-detail-value">${account.numero_compte}</div>
+                    <div class="account-detail-value">${escapeHtml(account.numero_compte)}</div>
                 </div>
                 <div class="account-detail-item">
                     <div class="account-detail-label">Statut</div>
@@ -409,7 +480,7 @@ function updateAccountsDisplay() {
                 <button class="account-action-btn secondary" onclick="viewAccountHistory(${account.id})">
                     📋 Historique
                 </button>
-                <button class="account-action-btn secondary" onclick="downloadRIB('${account.iban}', '${account.numero_compte}')">
+                <button class="account-action-btn secondary rib-btn" type="button" data-iban="${escapeHtmlAttr(account.iban)}" data-numero="${escapeHtmlAttr(account.numero_compte)}">
                     📄 Télécharger RIB
                 </button>
             </div>
@@ -503,13 +574,19 @@ function downloadRIB(iban, numeroCompte) {
 function updateAccountSelect() {
     const select = document.getElementById('compte-source');
     if (!select) return;
-    
-    select.innerHTML = '<option value="">Sélectionnez un compte</option>' +
-        currentAccounts.map(account => `
-            <option value="${account.id}">
-                ${account.type_compte === 'courant' ? 'Compte Courant' : 'Compte Épargne'} - ${formatMoney(account.solde)}
-            </option>
-        `).join('');
+
+    select.textContent = '';
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Sélectionnez un compte';
+    select.appendChild(defaultOpt);
+
+    currentAccounts.forEach(account => {
+        const opt = document.createElement('option');
+        opt.value = String(account.id);
+        opt.textContent = `${account.type_compte === 'courant' ? 'Compte Courant' : 'Compte Épargne'} - ${formatMoney(account.solde)}`;
+        select.appendChild(opt);
+    });
 }
 
 function updateCardsDisplay() {
@@ -526,11 +603,11 @@ function updateCardsDisplay() {
                 </span>
                 <div class="card-header-row">
                     <div class="card-chip"></div>
-                    <div class="card-type-logo">${card.type_carte.toUpperCase()}</div>
+                    <div class="card-type-logo">${escapeHtml(String(card.type_carte || '').toUpperCase())}</div>
                 </div>
                 <div class="card-number">${formatCardNumber(card.numero_carte)}</div>
                 <div class="card-details">
-                    <div class="card-holder">${card.titulaire}</div>
+                    <div class="card-holder">${escapeHtml(card.titulaire)}</div>
                     <div class="card-expiry">
                         <div class="card-expiry-label">Expire</div>
                         <div class="card-expiry-value">${formatCardDate(card.date_expiration)}</div>
@@ -559,10 +636,10 @@ function updateTransactionsDisplay() {
     const transactionsHTML = currentTransactions.map(t => {
         const isDebit = t.compte_source_id === currentAccounts[0]?.id;
         return `
-            <div class="transaction-item ${t.type_transaction}">
+            <div class="transaction-item ${safeTransactionType(t.type_transaction)}">
                 <div class="transaction-icon">${getTransactionIcon(t.type_transaction)}</div>
                 <div class="transaction-details">
-                    <div class="transaction-title">${t.description || getTransactionLabel(t.type_transaction)}</div>
+                    <div class="transaction-title">${escapeHtml(t.description || getTransactionLabel(t.type_transaction))}</div>
                     <div class="transaction-date">${formatDateTime(t.date_transaction)}</div>
                 </div>
                 <div class="transaction-amount ${isDebit ? 'debit' : 'credit'}">
@@ -591,10 +668,10 @@ function updateBeneficiariesDisplay() {
         <div class="beneficiary-card" style="position: relative;">
             <button class="beneficiary-delete" onclick="deleteBeneficiary(${b.id})" title="Supprimer">✕</button>
             <div class="beneficiary-avatar">${(b.prenom || 'X')[0]}${(b.nom || 'X')[0]}</div>
-            <div class="beneficiary-name">${b.prenom} ${b.nom}</div>
-            <div class="beneficiary-iban">${b.iban}</div>
+            <div class="beneficiary-name">${escapeHtml(`${b.prenom || ''} ${b.nom || ''}`.trim())}</div>
+            <div class="beneficiary-iban">${escapeHtml(b.iban)}</div>
             <div class="beneficiary-actions">
-                <button class="btn btn-sm btn-primary" onclick="useIban('${b.iban}')">💸 Virer</button>
+                <button class="btn btn-sm btn-primary use-iban-btn" type="button" data-iban="${escapeHtmlAttr(b.iban)}">💸 Virer</button>
             </div>
         </div>
     `).join('');
@@ -805,13 +882,26 @@ function showToast(message, type = 'info') {
     const container = document.getElementById('toast-container');
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    toast.innerHTML = `
-        <div class="toast-icon">${type === 'success' ? '✓' : type === 'error' ? '✕' : 'ℹ'}</div>
-        <div class="toast-content">
-            <div class="toast-title">${type === 'success' ? 'Succès' : type === 'error' ? 'Erreur' : 'Information'}</div>
-            <div class="toast-message">${message}</div>
-        </div>
-    `;
+
+    const icon = document.createElement('div');
+    icon.className = 'toast-icon';
+    icon.textContent = type === 'success' ? '✓' : type === 'error' ? '✕' : 'ℹ';
+
+    const content = document.createElement('div');
+    content.className = 'toast-content';
+
+    const title = document.createElement('div');
+    title.className = 'toast-title';
+    title.textContent = type === 'success' ? 'Succès' : type === 'error' ? 'Erreur' : 'Information';
+
+    const msg = document.createElement('div');
+    msg.className = 'toast-message';
+    msg.textContent = String(message);
+
+    content.appendChild(title);
+    content.appendChild(msg);
+    toast.appendChild(icon);
+    toast.appendChild(content);
     
     container.appendChild(toast);
     
@@ -824,10 +914,13 @@ function showToast(message, type = 'info') {
 function showNotificationPopup(data) {
     const popup = document.createElement('div');
     popup.className = 'notification-popup';
-    popup.innerHTML = `
-        <strong>${data.titre}</strong>
-        <p>${data.message}</p>
-    `;
+
+    const strong = document.createElement('strong');
+    strong.textContent = String(data?.titre ?? '');
+    const p = document.createElement('p');
+    p.textContent = String(data?.message ?? '');
+    popup.appendChild(strong);
+    popup.appendChild(p);
     document.body.appendChild(popup);
     
     setTimeout(() => {
@@ -839,7 +932,7 @@ function showNotificationPopup(data) {
 function showBroadcastMessage(message) {
     const div = document.createElement('div');
     div.className = 'broadcast-message';
-    div.innerHTML = message;
+    div.textContent = String(message);
     document.body.appendChild(div);
     
     setTimeout(() => div.remove(), 8000);
@@ -881,116 +974,4 @@ function getTransactionIcon(type) {
 function getTransactionLabel(type) {
     const labels = { 'virement': 'Virement', 'depot': 'Dépôt', 'retrait': 'Retrait', 'paiement_carte': 'Paiement carte' };
     return labels[type] || 'Transaction';
-}
-
-// 🔓 VULNÉRABILITÉ: Affiche les données sensibles de tous les utilisateurs
-function displayExposedData(data) {
-    const container = document.getElementById('exposed-data');
-    if (!container) return;
-    
-    container.innerHTML = data.map(item => {
-        const user = item.user;
-        const comptes = item.comptes || [];
-        const cartes = item.cartes || [];
-        
-        const totalSolde = comptes.reduce((sum, c) => sum + parseFloat(c.solde), 0);
-        
-        return `
-            <div class="exposed-user-card">
-                <div class="exposed-user-header">
-                    <div class="exposed-user-avatar">${(user.prenom || 'X')[0]}${(user.nom || 'X')[0]}</div>
-                    <div class="exposed-user-info">
-                        <h4>${user.prenom} ${user.nom}</h4>
-                        <p>${user.email}</p>
-                    </div>
-                </div>
-                
-                <div class="exposed-data-row">
-                    <span class="exposed-data-label">📞 Téléphone</span>
-                    <span class="exposed-data-value">${user.telephone || 'N/A'}</span>
-                </div>
-                
-                <div class="exposed-data-row">
-                    <span class="exposed-data-label">📍 Adresse</span>
-                    <span class="exposed-data-value">${user.adresse || 'N/A'}</span>
-                </div>
-                
-                <div class="exposed-data-row">
-                    <span class="exposed-data-label">💰 Solde Total</span>
-                    <span class="exposed-data-value balance">${formatMoney(totalSolde)}</span>
-                </div>
-                
-                ${comptes.map(compte => `
-                    <div class="exposed-data-row">
-                        <span class="exposed-data-label">🏦 ${compte.type_compte}</span>
-                        <span class="exposed-data-value iban">${compte.iban}</span>
-                    </div>
-                    <div class="exposed-data-row">
-                        <span class="exposed-data-label" style="padding-left: 20px;">Solde</span>
-                        <span class="exposed-data-value">${formatMoney(compte.solde)}</span>
-                    </div>
-                `).join('')}
-                
-                ${cartes.length > 0 ? `
-                    <div class="exposed-card-info">
-                        <div style="color: #9ca3af; font-size: 12px; margin-bottom: 5px;">💳 Cartes bancaires</div>
-                        ${cartes.map(carte => `
-                            <div class="exposed-card-number">${formatCardNumber(carte.numero_carte)}</div>
-                            <div style="display: flex; justify-content: space-between; font-size: 12px; color: #9ca3af;">
-                                <span>Exp: ${formatCardDate(carte.date_expiration)}</span>
-                                <span>CVV: <span style="color: #ef4444;">${carte.cvv}</span></span>
-                            </div>
-                        `).join('')}
-                    </div>
-                ` : ''}
-                
-                <button class="btn btn-sm btn-danger" style="width: 100%; margin-top: 15px;" onclick="stealMoney('${comptes[0]?.iban || ''}', ${comptes[0]?.id || 0})">
-                    💸 Voler l'argent (XSS Demo)
-                </button>
-            </div>
-        `;
-    }).join('');
-}
-
-// 🔓 Fonction de démonstration de vol d'argent
-function stealMoney(victimIban, victimAccountId) {
-    if (!victimIban || !victimAccountId) {
-        showToast('Impossible de voler: données manquantes', 'error');
-        return;
-    }
-    
-    // Simule un virement depuis le compte de la victime vers l'attaquant
-    showToast(`🔓 Tentative de vol depuis IBAN: ${victimIban}`, 'info');
-    
-    // En réalité, cela exploiterait une faille pour effectuer un virement
-    console.log('🔓 ATTAQUE: Vol simulé depuis le compte', victimAccountId);
-}
-
-// Fonctions de test (console)
-function voirTousLesUtilisateurs() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return console.log('Non connecté');
-    ws.send(JSON.stringify({ type: 'admin_command', data: { command: 'get_all_users' } }));
-}
-
-function rechercherUtilisateur(recherche) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return console.log('Non connecté');
-    ws.send(JSON.stringify({ type: 'search_user', data: { query: recherche } }));
-}
-
-function envoyerMessageGlobal(message) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return console.log('Non connecté');
-    ws.send(JSON.stringify({ type: 'broadcast_message', data: { message: message } }));
-}
-
-function commandeAdmin(commande, params) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return console.log('Non connecté');
-    ws.send(JSON.stringify({ type: 'admin_command', data: { command: commande, params: params } }));
-}
-
-function voirTousLesSoldes() {
-    commandeAdmin('get_all_balances');
-}
-
-function modifierSolde(compteId, nouveauSolde) {
-    commandeAdmin('update_balance', { accountId: compteId, newBalance: nouveauSolde });
 }

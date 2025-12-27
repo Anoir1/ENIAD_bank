@@ -2,6 +2,9 @@ let ws;
 
 document.addEventListener('DOMContentLoaded', () => {
     connectWebSocket();
+
+    document.getElementById('loginForm')?.addEventListener('submit', handleLogin);
+    document.getElementById('registerForm')?.addEventListener('submit', handleRegister);
     
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -10,13 +13,18 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.classList.add('active');
             document.querySelectorAll('.auth-form').forEach(form => form.classList.remove('active'));
             document.getElementById(tab + 'Form').classList.add('active');
-            document.getElementById('messageBox').innerHTML = '';
+            document.getElementById('messageBox').textContent = '';
         });
     });
 });
 
+function getWebSocketUrl() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}`;
+}
+
 function connectWebSocket() {
-    ws = new WebSocket('ws://localhost:3000');
+    ws = new WebSocket(getWebSocketUrl());
     
     ws.onopen = () => {
         console.log('Connecté au serveur');
@@ -62,14 +70,16 @@ function handleWebSocketMessage(message) {
 
 function showMessage(message, type = 'info') {
     const messageBox = document.getElementById('messageBox');
-    messageBox.innerHTML = `
-        <div class="alert alert-${type}">
-            ${type === 'error' ? '❌' : '✓'} ${message}
-        </div>
-    `;
+    messageBox.textContent = '';
+
+    const alert = document.createElement('div');
+    alert.className = `alert alert-${type}`;
+    const prefix = type === 'error' ? '❌ ' : '✓ ';
+    alert.textContent = prefix + String(message);
+    messageBox.appendChild(alert);
     
     setTimeout(() => {
-        messageBox.innerHTML = '';
+        messageBox.textContent = '';
     }, 5000);
 }
 

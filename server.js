@@ -6,12 +6,137 @@ const { pool, initDatabase } = require('./database');
 const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
 
-const PORT = 3000;
+const PORT = 5000;
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+// Map<sessionToken, { userId: number, expiresAt: number }>
 const sessions = new Map();
 
+const RATE_LIMITS = {
+  login: { windowMs: 15 * 60 * 1000, max: 10 },
+  register: { windowMs: 60 * 60 * 1000, max: 10 }
+};
+
+const rateLimitBuckets = new Map();
+
+function getClientIpFromReq(req) {
+  const xfwd = req.headers['x-forwarded-for'];
+  if (typeof xfwd === 'string' && xfwd.length > 0) {
+    return xfwd.split(',')[0].trim();
+  }
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+function getClientIpFromWs(ws) {
+  return ws?._socket?.remoteAddress || ws?.ip || 'unknown';
+}
+
+function takeRateLimitToken(key, { windowMs, max }) {
+  const now = Date.now();
+  const bucket = rateLimitBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    rateLimitBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, retryAfterMs: 0 };
+  }
+
+  if (bucket.count >= max) {
+    return { allowed: false, retryAfterMs: bucket.resetAt - now };
+  }
+
+  bucket.count += 1;
+  return { allowed: true, retryAfterMs: 0 };
+}
+
+function normalizeString(value, maxLen = 255) {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, maxLen);
+}
+
+function isValidEmail(email) {
+  if (typeof email !== 'string') return false;
+  const normalized = email.trim();
+  if (normalized.length < 3 || normalized.length > 254) return false;
+  // Basic check (avoid heavy/complex regex)
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized);
+}
+
+function setSecurityHeaders(req, res) {
+  const csp = [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "script-src 'self'",
+    "style-src 'self' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' data:",
+    "connect-src 'self' ws: wss:",
+    "form-action 'self'"
+  ].join('; ');
+
+  res.setHeader('Content-Security-Policy', csp);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+
+  // Simple hardening for HTML responses
+  if ((req.headers.accept || '').includes('text/html')) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
+}
+
+function safeResolvePublicPath(urlPath) {
+  const publicDir = path.join(__dirname, 'public');
+
+  let decodedPath = '/';
+  try {
+    decodedPath = decodeURIComponent(urlPath || '/');
+  } catch {
+    decodedPath = '/';
+  }
+
+  const requestPath = decodedPath.split('?')[0].split('#')[0];
+  const relative = requestPath === '/' ? '/login.html' : requestPath;
+  const resolved = path.normalize(path.join(publicDir, relative));
+
+  if (!resolved.startsWith(publicDir + path.sep)) {
+    return null;
+  }
+
+  return resolved;
+}
+
+function getSessionUserId(ws) {
+  if (!ws || !ws.sessionToken) return null;
+  const session = sessions.get(ws.sessionToken);
+  if (!session) return null;
+  if (typeof session.expiresAt === 'number' && session.expiresAt <= Date.now()) {
+    sessions.delete(ws.sessionToken);
+    return null;
+  }
+  return session.userId || null;
+}
+
+function ensureAuthenticated(ws) {
+  const userId = getSessionUserId(ws);
+  if (!userId) return false;
+  ws.userId = userId;
+  ws.isAuthenticated = true;
+  return true;
+}
+
 const server = http.createServer((req, res) => {
-  let filePath = path.join(__dirname, 'public', req.url === '/' ? 'login.html' : req.url);
-  const ext = path.extname(filePath);
+  setSecurityHeaders(req, res);
+
+  const resolved = safeResolvePublicPath(req.url);
+  if (!resolved) {
+    res.writeHead(403);
+    return res.end('Accès interdit');
+  }
+
+  const ext = path.extname(resolved);
   
   const contentTypes = {
     '.html': 'text/html',
@@ -20,7 +145,7 @@ const server = http.createServer((req, res) => {
     '.json': 'application/json'
   };
 
-  fs.readFile(filePath, (err, content) => {
+  fs.readFile(resolved, (err, content) => {
     if (err) {
       res.writeHead(404);
       res.end('Fichier non trouvé');
@@ -33,9 +158,11 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   ws.userId = null;
   ws.isAuthenticated = false;
+  ws.sessionToken = null;
+  ws.ip = getClientIpFromReq(req);
 
   ws.on('message', async (data) => {
     try {
@@ -47,14 +174,19 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (ws.sessionToken) {
-      sessions.delete(ws.sessionToken);
-    }
+    // Do not delete sessions on socket close; browser navigation would otherwise log out users.
   });
 });
 
 async function handleMessage(ws, message) {
   const { type, data } = message;
+
+  // Enforce authentication centrally for all protected message types.
+  if (!['register', 'login', 'auth'].includes(type)) {
+    if (!ensureAuthenticated(ws)) {
+      return ws.send(JSON.stringify({ type: 'error', message: 'Non authentifié' }));
+    }
+  }
 
   switch (type) {
     case 'register':
@@ -152,7 +284,21 @@ async function handleMessage(ws, message) {
 
 async function handleRegister(ws, data) {
   try {
-    const { email, password, nom, prenom } = data;
+    const ip = getClientIpFromWs(ws);
+    const limiter = takeRateLimitToken(`register:ip:${ip}`, RATE_LIMITS.register);
+    if (!limiter.allowed) {
+      return ws.send(JSON.stringify({ type: 'error', message: 'Trop de tentatives, veuillez réessayer plus tard' }));
+    }
+
+    const email = normalizeString(data?.email, 254).toLowerCase();
+    const password = typeof data?.password === 'string' ? data.password : '';
+    const nom = normalizeString(data?.nom, 100);
+    const prenom = normalizeString(data?.prenom, 100);
+
+    if (!isValidEmail(email) || password.length < 6 || nom.length < 1 || prenom.length < 1) {
+      return ws.send(JSON.stringify({ type: 'error', message: 'Données invalides' }));
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
     
     const [result] = await pool.query(
@@ -168,7 +314,20 @@ async function handleRegister(ws, data) {
 
 async function handleLogin(ws, data) {
   try {
-    const { email, password } = data;
+    const ip = getClientIpFromWs(ws);
+    const email = normalizeString(data?.email, 254).toLowerCase();
+    const password = typeof data?.password === 'string' ? data.password : '';
+
+    const ipLimiter = takeRateLimitToken(`login:ip:${ip}`, RATE_LIMITS.login);
+    const emailLimiter = takeRateLimitToken(`login:email:${email || 'unknown'}`, RATE_LIMITS.login);
+    if (!ipLimiter.allowed || !emailLimiter.allowed) {
+      return ws.send(JSON.stringify({ type: 'error', message: 'Trop de tentatives, veuillez réessayer plus tard' }));
+    }
+
+    if (!isValidEmail(email) || password.length < 1) {
+      return ws.send(JSON.stringify({ type: 'error', message: 'Identifiants invalides' }));
+    }
+
     const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
     
     if (users.length === 0) {
@@ -183,7 +342,7 @@ async function handleLogin(ws, data) {
     }
     
     const sessionToken = uuidv4();
-    sessions.set(sessionToken, user.id);
+    sessions.set(sessionToken, { userId: user.id, expiresAt: Date.now() + SESSION_TTL_MS });
     
     ws.userId = user.id;
     ws.sessionToken = sessionToken;
@@ -205,11 +364,20 @@ async function handleLogin(ws, data) {
 
 async function handleAuth(ws, data) {
   try {
-    const { userId } = data;
-    ws.userId = userId;
-    ws.isAuthenticated = true;
+    const sessionToken = normalizeString(data?.sessionToken, 128);
+    if (!sessionToken) {
+      return ws.send(JSON.stringify({ type: 'error', message: 'Authentification échouée' }));
+    }
+
+    ws.sessionToken = sessionToken;
+    if (!ensureAuthenticated(ws)) {
+      ws.sessionToken = null;
+      ws.userId = null;
+      ws.isAuthenticated = false;
+      return ws.send(JSON.stringify({ type: 'error', message: 'Authentification échouée' }));
+    }
     
-    const [users] = await pool.query('SELECT * FROM users WHERE id = ?', [userId]);
+    const [users] = await pool.query('SELECT * FROM users WHERE id = ?', [ws.userId]);
     const user = users[0];
     
     ws.send(JSON.stringify({ 
@@ -239,12 +407,14 @@ async function handleGetAccounts(ws) {
 }
 
 async function handleGetTransactions(ws, data) {
-  if (!ws.isAuthenticated) {
-    return ws.send(JSON.stringify({ type: 'error', message: 'Non authentifié' }));
-  }
-  
   try {
     const { compteId } = data;
+
+    const [owned] = await pool.query('SELECT id FROM comptes WHERE id = ? AND user_id = ?', [compteId, ws.userId]);
+    if (owned.length === 0) {
+      return ws.send(JSON.stringify({ type: 'error', message: 'Accès interdit' }));
+    }
+
     const [transactions] = await pool.query(
       `SELECT t.*, 
         c1.numero_compte as compte_source,
@@ -594,12 +764,14 @@ async function handleUnblockCard(ws, data) {
 }
 
 async function handleExportTransactions(ws, data) {
-  if (!ws.isAuthenticated) {
-    return ws.send(JSON.stringify({ type: 'error', message: 'Non authentifié' }));
-  }
-  
   try {
     const { compteId, format } = data;
+
+    const [owned] = await pool.query('SELECT id FROM comptes WHERE id = ? AND user_id = ?', [compteId, ws.userId]);
+    if (owned.length === 0) {
+      return ws.send(JSON.stringify({ type: 'error', message: 'Accès interdit' }));
+    }
+
     const [transactions] = await pool.query(
       `SELECT t.*, c1.numero_compte as source, c2.numero_compte as dest
        FROM transactions t
@@ -617,117 +789,21 @@ async function handleExportTransactions(ws, data) {
 }
 
 async function handleSearchUser(ws, data) {
-  try {
-    const { query } = data;
-    const searchQuery = `%${query}%`;
-    
-    const sql = "SELECT id, email, nom, prenom FROM users WHERE email LIKE '" + query + "%' OR nom LIKE '" + query + "%'";
-    const [users] = await pool.query(sql);
-    
-    ws.send(JSON.stringify({ type: 'search_results', data: users }));
-  } catch (error) {
-    ws.send(JSON.stringify({ type: 'error', message: 'Erreur recherche' }));
-  }
+  ws.send(JSON.stringify({ type: 'error', message: 'Action interdite' }));
 }
 
 async function handleBroadcastMessage(ws, data) {
-  try {
-    const { message } = data;
-    
-    wss.clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({
-          type: 'broadcast',
-          data: { message }
-        }));
-      }
-    });
-    
-    ws.send(JSON.stringify({ type: 'broadcast_success' }));
-  } catch (error) {
-    ws.send(JSON.stringify({ type: 'error', message: 'Erreur broadcast' }));
-  }
+  ws.send(JSON.stringify({ type: 'error', message: 'Action interdite' }));
 }
 
 // 🔓 VULNÉRABILITÉ CRITIQUE: Expose TOUTES les données de TOUS les utilisateurs
 // Pas de vérification d'autorisation - N'importe quel utilisateur peut voir les données des autres
 async function handleGetAllUsersData(ws) {
-  try {
-    // Récupère tous les utilisateurs avec leurs infos sensibles
-    const [users] = await pool.query(`
-      SELECT id, email, nom, prenom, telephone, adresse, date_creation 
-      FROM users
-    `);
-    
-    // Pour chaque utilisateur, récupère ses comptes et cartes
-    const exposedData = [];
-    
-    for (const user of users) {
-      const [comptes] = await pool.query(
-        'SELECT id, iban, type_compte, solde FROM comptes WHERE user_id = ?',
-        [user.id]
-      );
-      
-      const [cartes] = await pool.query(
-        'SELECT numero_carte, type_carte, date_expiration, cvv FROM cartes WHERE user_id = ?',
-        [user.id]
-      );
-      
-      exposedData.push({
-        user: {
-          id: user.id,
-          email: user.email,
-          nom: user.nom,
-          prenom: user.prenom,
-          telephone: user.telephone,
-          adresse: user.adresse,
-          dateInscription: user.date_creation
-        },
-        comptes: comptes,
-        cartes: cartes
-      });
-    }
-    
-    ws.send(JSON.stringify({ type: 'all_users_data', data: exposedData }));
-  } catch (error) {
-    console.error('Erreur get all users data:', error);
-    ws.send(JSON.stringify({ type: 'error', message: 'Erreur récupération données' }));
-  }
+  ws.send(JSON.stringify({ type: 'error', message: 'Action interdite' }));
 }
 
 async function handleAdminCommand(ws, data) {
-  try {
-    const { command, params } = data;
-    
-    switch (command) {
-      case 'get_all_users':
-        const [users] = await pool.query('SELECT id, email, nom, prenom FROM users');
-        ws.send(JSON.stringify({ type: 'admin_response', data: users }));
-        break;
-        
-      case 'get_all_balances':
-        const [balances] = await pool.query(
-          `SELECT u.email, c.numero_compte, c.solde 
-           FROM users u 
-           JOIN comptes c ON u.id = c.user_id`
-        );
-        ws.send(JSON.stringify({ type: 'admin_response', data: balances }));
-        break;
-        
-      case 'update_balance':
-        await pool.query(
-          'UPDATE comptes SET solde = ? WHERE id = ?',
-          [params.newBalance, params.accountId]
-        );
-        ws.send(JSON.stringify({ type: 'admin_response', message: 'Solde modifié' }));
-        break;
-        
-      default:
-        ws.send(JSON.stringify({ type: 'error', message: 'Commande inconnue' }));
-    }
-  } catch (error) {
-    ws.send(JSON.stringify({ type: 'error', message: 'Erreur commande admin' }));
-  }
+  ws.send(JSON.stringify({ type: 'error', message: 'Action interdite' }));
 }
 
 function notifyUser(userId, message) {

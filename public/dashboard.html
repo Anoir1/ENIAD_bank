@@ -75,7 +75,7 @@
             <header class="content-header">
                 <h1 id="page-title">Vue d'ensemble</h1>
                 <div class="header-actions">
-                    <button class="notification-btn" onclick="showNotifications()">
+                    <button class="notification-btn" id="notifications-btn" type="button">
                         🔔
                         <span class="notification-badge" id="notification-badge" style="display:none;"></span>
                     </button>
@@ -95,15 +95,15 @@
                             </div>
                         </div>
                         <div class="welcome-quick-actions">
-                            <button class="quick-action-btn" onclick="showSection('virement')">
+                            <button class="quick-action-btn" type="button" data-quick-section="virement">
                                 <span class="quick-action-icon">💸</span>
                                 <span>Virement</span>
                             </button>
-                            <button class="quick-action-btn" onclick="showSection('cartes')">
+                            <button class="quick-action-btn" type="button" data-quick-section="cartes">
                                 <span class="quick-action-icon">💳</span>
                                 <span>Cartes</span>
                             </button>
-                            <button class="quick-action-btn" onclick="showSection('historique')">
+                            <button class="quick-action-btn" type="button" data-quick-section="historique">
                                 <span class="quick-action-icon">📋</span>
                                 <span>Historique</span>
                             </button>
@@ -265,7 +265,7 @@
                             <option value="credit">Crédits</option>
                             <option value="debit">Débits</option>
                         </select>
-                        <button class="btn btn-secondary" onclick="exportTransactions()">📥 Exporter</button>
+                        <button class="btn btn-secondary" id="export-btn" type="button">📥 Exporter</button>
                     </div>
                     <div id="transactions-list" class="transactions-container"></div>
                 </section>
